@@ -1,7 +1,7 @@
 {
     "cmake.useCMakePresets": "always",
-    "cmake.configurePreset": "Debug",
-    "cmake.buildPreset": "Debug",
+    "cmake.configurePreset": "vscode-debug",
+    "cmake.buildPreset": "vscode-debug",
     "cmake.configureOnOpen": true,
     "cmake.cmakePath": "cube-cmake",
     "cmake.configureArgs": [

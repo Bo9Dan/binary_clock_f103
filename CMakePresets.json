@@ -18,6 +18,11 @@
             }
         },
         {
+            "name": "vscode-debug",
+            "displayName": "VSCode Debug",
+            "inherits": "Debug"
+        },
+        {
             "name": "Release",
             "inherits": "default",
             "cacheVariables": {
@@ -29,6 +34,11 @@
         {
             "name": "Debug",
             "configurePreset": "Debug"
+        },
+        {
+            "name": "vscode-debug",
+            "displayName": "VSCode Debug",
+            "configurePreset": "vscode-debug"
         },
         {
             "name": "Release",
