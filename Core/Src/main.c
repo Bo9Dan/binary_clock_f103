@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "alarm_service.h"
+#include "app_scheduler.h"
 #include "apds9960_sensor.h"
 #include "htu21d_sensor.h"
 #include "rtc_ds3231.h"
@@ -79,14 +80,9 @@ typedef enum
 #define BRIGHTNESS_LOW_LIGHT_CLEAR 20U
 #define BRIGHTNESS_HIGH_LIGHT_CLEAR 800U
 #define BRIGHTNESS_SMOOTH_STEP_PERCENT 5U
-#define ENV_READ_PERIOD_MS 2000U
-#define GESTURE_READ_PERIOD_MS 120U
 #define GESTURE_ALARM_SEQUENCE_TIMEOUT_MS 1500U
-#define LIGHT_READ_PERIOD_MS 1000U
-#define PROXIMITY_READ_PERIOD_MS 120U
 #define PROXIMITY_SOFT_ALARM_ON 80U
 #define PROXIMITY_SOFT_ALARM_OFF 35U
-#define RTC_READ_PERIOD_MS 1000U
 #define RTC_WRITE_EXAMPLE_ON_BOOT 0
 #define BUTTON_COUNT 4U
 #define BUTTON_MODE_INDEX 0U
@@ -151,7 +147,7 @@ static void Debug_WriteLine(const char *text);
 static void Debug_WriteDateTime(const RtcDs3231_DateTime *date_time);
 static void Debug_WriteMeasurement(const Htu21dMeasurement *measurement);
 static void Debug_WriteAmbientLight(const Apds9960AmbientLight *light);
-static void ButtonTest_Init(void);
+static void ButtonTest_Init(uint32_t now_ms);
 static void ButtonTest_Update(uint32_t now_ms);
 static uint8_t Brightness_CalculateTargetPercent(uint16_t clear_value);
 static uint8_t Brightness_StepToward(uint8_t current_percent,
@@ -186,6 +182,9 @@ static bool App_IsAlarmRinging(void);
 static void App_SnoozeAlarmOneMinute(void);
 static void App_DismissAlarm(void);
 static void App_HandleGesture(Apds9960Gesture gesture, uint32_t now_ms);
+static void App_ReadRtcAndRefresh(void);
+static void App_ReadEnvironmentAndRefresh(void);
+static void App_ReadAmbientLightAndUpdate(uint8_t *current_brightness_percent);
 static void ShiftRegister_Write24(uint32_t value);
 
 /* USER CODE END PFP */
@@ -260,10 +259,8 @@ static void Debug_WriteAmbientLight(const Apds9960AmbientLight *light)
   Debug_WriteLine(line);
 }
 
-static void ButtonTest_Init(void)
+static void ButtonTest_Init(uint32_t now_ms)
 {
-  uint32_t now_ms = HAL_GetTick();
-
   for (uint32_t index = 0U; index < BUTTON_COUNT; index++)
   {
     GPIO_PinState level = HAL_GPIO_ReadPin(button_test_states[index].port,
@@ -605,6 +602,80 @@ static const char *App_GestureName(Apds9960Gesture gesture)
     case APDS9960_GESTURE_NONE:
     default:
       return "NONE";
+  }
+}
+
+static void App_ReadRtcAndRefresh(void)
+{
+  RtcDs3231_DateTime now;
+
+  if (RtcDs3231_ReadDateTime(&hi2c1, &now) == HAL_OK)
+  {
+    Debug_WriteDateTime(&now);
+    latest_rtc_time = now;
+    latest_rtc_time_valid = true;
+    if (!App_IsEditing())
+    {
+      Display_WriteCurrentMode(&latest_rtc_time);
+    }
+  }
+  else
+  {
+    Debug_WriteLine("RTC read FAILED");
+  }
+}
+
+static void App_ReadEnvironmentAndRefresh(void)
+{
+  Htu21dMeasurement measurement;
+
+  if (Htu21d_ReadMeasurement(&hi2c1, &measurement) == HAL_OK)
+  {
+    Debug_WriteMeasurement(&measurement);
+    latest_env_measurement = measurement;
+    latest_env_measurement_valid = true;
+    if ((app_display_mode == APP_DISPLAY_MODE_ENV) && !App_IsEditing())
+    {
+      Display_WriteEnvironment(&latest_env_measurement);
+    }
+  }
+  else
+  {
+    Debug_WriteLine("HTU21D read FAILED");
+  }
+}
+
+static void App_ReadAmbientLightAndUpdate(uint8_t *current_brightness_percent)
+{
+  Apds9960AmbientLight light;
+  HAL_StatusTypeDef status;
+
+  if (current_brightness_percent == NULL)
+  {
+    return;
+  }
+
+  status = Apds9960_ReadAmbientLight(&hi2c1, &light);
+  if (status == HAL_OK)
+  {
+    uint8_t target_brightness_percent =
+        Brightness_CalculateTargetPercent(light.clear);
+    char line[72];
+
+    *current_brightness_percent =
+        Brightness_StepToward(*current_brightness_percent,
+                              target_brightness_percent);
+    Brightness_SetPercent(*current_brightness_percent);
+    Debug_WriteAmbientLight(&light);
+    (void) snprintf(line, sizeof(line),
+                    "AUTO BRIGHTNESS target=%u%% current=%u%%",
+                    target_brightness_percent,
+                    *current_brightness_percent);
+    Debug_WriteLine(line);
+  }
+  else if (status != HAL_BUSY)
+  {
+    Debug_WriteLine("APDS-9960 light read FAILED");
   }
 }
 
@@ -1136,7 +1207,7 @@ int main(void)
   Brightness_SetPercent(BRIGHTNESS_MAX_PERCENT);
 
   ShiftRegister_Write24(0U);
-  ButtonTest_Init();
+  ButtonTest_Init(0U);
   AlarmService_Init(&alarm_service, &hi2c1, BUZZER_GPIO_Port, BUZZER_Pin);
   Debug_WriteLine("binary_clock_f103 bring-up started");
   Debug_WriteLine("Display modes: TIME -> DATE -> ENV -> ALARM");
@@ -1182,11 +1253,14 @@ int main(void)
     {
       Debug_WriteLine("Alarm init FAILED");
     }
+
+    App_ReadRtcAndRefresh();
   }
 
   if (Htu21d_IsReady(&hi2c1))
   {
     Debug_WriteLine("HTU21D found");
+    App_ReadEnvironmentAndRefresh();
   }
   else
   {
@@ -1231,6 +1305,11 @@ int main(void)
     Debug_WriteLine("APDS-9960 not found on I2C1");
   }
 
+  if (HAL_TIM_Base_Start_IT(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1241,43 +1320,28 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     static uint8_t current_brightness_percent = BRIGHTNESS_MAX_PERCENT;
-    static uint32_t last_env_read_ms;
-    static uint32_t last_gesture_read_ms;
-    static uint32_t last_light_read_ms;
-    static uint32_t last_proximity_read_ms;
-    static uint32_t last_blink_ms;
-    static uint32_t last_rtc_read_ms;
-    static uint32_t last_alarm_tick_ms;
     static bool soft_alarm_by_proximity = false;
-    uint32_t now_ms = HAL_GetTick();
-    uint32_t alarm_elapsed_ms = now_ms - last_alarm_tick_ms;
 
-    if (last_alarm_tick_ms == 0U)
+    while (AppScheduler_Consume10msTick())
     {
-      alarm_elapsed_ms = 0U;
-    }
-    else if (alarm_elapsed_ms > 1000U)
-    {
-      alarm_elapsed_ms = 1000U;
-    }
+      uint32_t now_ms = AppScheduler_NowMs();
 
-    last_alarm_tick_ms = now_ms;
-    ButtonTest_Update(now_ms);
-    AlarmService_Process(&alarm_service);
+      ButtonTest_Update(now_ms);
+      AlarmService_Process(&alarm_service);
 
-    if (AlarmService_OnTick(&alarm_service, (uint16_t) alarm_elapsed_ms) &&
-        AlarmService_IsRinging(&alarm_service))
-    {
-      Display_WriteCurrentMode(latest_rtc_time_valid ? &latest_rtc_time : NULL);
+      if (AlarmService_OnTick(&alarm_service, 10U) &&
+          AlarmService_IsRinging(&alarm_service))
+      {
+        Display_WriteCurrentMode(latest_rtc_time_valid ? &latest_rtc_time : NULL);
+      }
     }
 
-    if ((now_ms - last_blink_ms) >= BRINGUP_STEP_DELAY_MS)
+    if (AppScheduler_Consume500msTick())
     {
       bool refresh_display = AlarmService_IsRinging(&alarm_service) ||
                              App_IsEditing() ||
                              (app_status_feedback_ticks > 0U);
 
-      last_blink_ms = now_ms;
       HAL_GPIO_TogglePin(BOARD_LED_GPIO_Port, BOARD_LED_Pin);
       app_edit_blink_on = !app_edit_blink_on;
 
@@ -1293,140 +1357,75 @@ int main(void)
       }
     }
 
-    if ((now_ms - last_rtc_read_ms) >= RTC_READ_PERIOD_MS)
+    if (AppScheduler_Consume1sTick())
     {
-      RtcDs3231_DateTime now;
-
-      last_rtc_read_ms = now_ms;
-      if (RtcDs3231_ReadDateTime(&hi2c1, &now) == HAL_OK)
-      {
-        Debug_WriteDateTime(&now);
-        latest_rtc_time = now;
-        latest_rtc_time_valid = true;
-        if (!App_IsEditing())
-        {
-          Display_WriteCurrentMode(&latest_rtc_time);
-        }
-      }
-      else
-      {
-        Debug_WriteLine("RTC read FAILED");
-      }
+      App_ReadRtcAndRefresh();
+      App_ReadAmbientLightAndUpdate(&current_brightness_percent);
     }
 
-    if ((now_ms - last_env_read_ms) >= ENV_READ_PERIOD_MS)
-    {
-      Htu21dMeasurement measurement;
-
-      last_env_read_ms = now_ms;
-      if (Htu21d_ReadMeasurement(&hi2c1, &measurement) == HAL_OK)
-      {
-        Debug_WriteMeasurement(&measurement);
-        latest_env_measurement = measurement;
-        latest_env_measurement_valid = true;
-        if ((app_display_mode == APP_DISPLAY_MODE_ENV) && !App_IsEditing())
-        {
-          Display_WriteEnvironment(&latest_env_measurement);
-        }
-      }
-      else
-      {
-        Debug_WriteLine("HTU21D read FAILED");
-      }
-    }
-
-    if ((now_ms - last_gesture_read_ms) >= GESTURE_READ_PERIOD_MS)
+    if (AppScheduler_Consume120msTick())
     {
       Apds9960Gesture gesture;
       HAL_StatusTypeDef status;
 
-      last_gesture_read_ms = now_ms;
       status = Apds9960_ReadGesture(&hi2c1, &gesture);
       if (status == HAL_OK)
       {
-        App_HandleGesture(gesture, now_ms);
+        App_HandleGesture(gesture, AppScheduler_NowMs());
       }
       else if (status != HAL_BUSY)
       {
         Debug_WriteLine("APDS-9960 gesture read FAILED");
       }
-    }
 
-    if (AlarmService_IsRinging(&alarm_service) &&
-        ((now_ms - last_proximity_read_ms) >= PROXIMITY_READ_PERIOD_MS))
-    {
-      uint8_t proximity;
-      HAL_StatusTypeDef status;
-
-      last_proximity_read_ms = now_ms;
-      status = Apds9960_ReadProximity(&hi2c1, &proximity);
-      if (status == HAL_OK)
+      if (AlarmService_IsRinging(&alarm_service))
       {
-        if (!soft_alarm_by_proximity &&
-            (proximity >= PROXIMITY_SOFT_ALARM_ON))
+        uint8_t proximity;
+
+        status = Apds9960_ReadProximity(&hi2c1, &proximity);
+        if (status == HAL_OK)
         {
-          char line[48];
+          if (!soft_alarm_by_proximity &&
+              (proximity >= PROXIMITY_SOFT_ALARM_ON))
+          {
+            char line[48];
 
-          soft_alarm_by_proximity = true;
-          AlarmService_SetSoftRinging(&alarm_service, true);
-          (void) snprintf(line, sizeof(line), "ALARM soft proximity=%u",
-                          proximity);
-          Debug_WriteLine(line);
+            soft_alarm_by_proximity = true;
+            AlarmService_SetSoftRinging(&alarm_service, true);
+            (void) snprintf(line, sizeof(line), "ALARM soft proximity=%u",
+                            proximity);
+            Debug_WriteLine(line);
+          }
+          else if (soft_alarm_by_proximity &&
+                   (proximity <= PROXIMITY_SOFT_ALARM_OFF))
+          {
+            char line[48];
+
+            soft_alarm_by_proximity = false;
+            AlarmService_SetSoftRinging(&alarm_service, false);
+            (void) snprintf(line, sizeof(line), "ALARM normal proximity=%u",
+                            proximity);
+            Debug_WriteLine(line);
+          }
         }
-        else if (soft_alarm_by_proximity &&
-                 (proximity <= PROXIMITY_SOFT_ALARM_OFF))
+        else if (status != HAL_BUSY)
         {
-          char line[48];
-
-          soft_alarm_by_proximity = false;
-          AlarmService_SetSoftRinging(&alarm_service, false);
-          (void) snprintf(line, sizeof(line), "ALARM normal proximity=%u",
-                          proximity);
-          Debug_WriteLine(line);
+          Debug_WriteLine("APDS-9960 proximity read FAILED");
         }
       }
-      else if (status != HAL_BUSY)
+      else if (soft_alarm_by_proximity)
       {
-        Debug_WriteLine("APDS-9960 proximity read FAILED");
+        soft_alarm_by_proximity = false;
+        AlarmService_SetSoftRinging(&alarm_service, false);
       }
     }
-    else if (!AlarmService_IsRinging(&alarm_service) && soft_alarm_by_proximity)
+
+    if (AppScheduler_Consume60sTick())
     {
-      soft_alarm_by_proximity = false;
-      AlarmService_SetSoftRinging(&alarm_service, false);
+      App_ReadEnvironmentAndRefresh();
     }
 
-    if ((now_ms - last_light_read_ms) >= LIGHT_READ_PERIOD_MS)
-    {
-      Apds9960AmbientLight light;
-      HAL_StatusTypeDef status;
-
-      last_light_read_ms = now_ms;
-      status = Apds9960_ReadAmbientLight(&hi2c1, &light);
-      if (status == HAL_OK)
-      {
-        char line[72];
-        uint8_t target_brightness_percent =
-            Brightness_CalculateTargetPercent(light.clear);
-
-        current_brightness_percent =
-            Brightness_StepToward(current_brightness_percent,
-                                  target_brightness_percent);
-        Brightness_SetPercent(current_brightness_percent);
-        Debug_WriteAmbientLight(&light);
-        (void) snprintf(line, sizeof(line),
-                        "AUTO BRIGHTNESS target=%u%% current=%u%%",
-                        target_brightness_percent,
-                        current_brightness_percent);
-        Debug_WriteLine(line);
-      }
-      else if (status != HAL_BUSY)
-      {
-        Debug_WriteLine("APDS-9960 light read FAILED");
-      }
-    }
-
-    HAL_Delay(1U);
+    __WFI();
   }
   /* USER CODE END 3 */
 }
@@ -1745,6 +1744,14 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if ((htim != NULL) && (htim->Instance == TIM2))
+  {
+    AppScheduler_On10msTickFromIsr();
+  }
+}
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == DS3231_INT_Pin)
