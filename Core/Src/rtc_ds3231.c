@@ -11,6 +11,7 @@
 #define DS3231_CONTROL_A1IE 0x01U
 #define DS3231_CONTROL_INTCN 0x04U
 #define DS3231_STATUS_A1F 0x01U
+#define DS3231_STATUS_OSF 0x80U
 #define DS3231_ALARM_MASK_IGNORE_DAY_DATE 0x80U
 
 static uint8_t BcdToUint(uint8_t value)
@@ -141,6 +142,42 @@ HAL_StatusTypeDef RtcDs3231_WriteDateTime(I2C_HandleTypeDef *hi2c,
   return HAL_I2C_Mem_Write(hi2c, DS3231_I2C_ADDRESS, DS3231_REGISTER_SECONDS,
                            I2C_MEMADD_SIZE_8BIT, registers, sizeof(registers),
                            DS3231_I2C_TIMEOUT_MS);
+}
+
+HAL_StatusTypeDef RtcDs3231_IsOscillatorStopFlagSet(I2C_HandleTypeDef *hi2c,
+                                                    bool *is_set)
+{
+  uint8_t status_reg;
+  HAL_StatusTypeDef status;
+
+  if (is_set == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  status = ReadRegister(hi2c, DS3231_REGISTER_STATUS, &status_reg);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  *is_set = (status_reg & DS3231_STATUS_OSF) != 0U;
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef RtcDs3231_ClearOscillatorStopFlag(I2C_HandleTypeDef *hi2c)
+{
+  uint8_t status_reg;
+  HAL_StatusTypeDef status;
+
+  status = ReadRegister(hi2c, DS3231_REGISTER_STATUS, &status_reg);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status_reg &= (uint8_t) ~DS3231_STATUS_OSF;
+  return WriteRegister(hi2c, DS3231_REGISTER_STATUS, status_reg);
 }
 
 HAL_StatusTypeDef RtcDs3231_ReadTime(I2C_HandleTypeDef *hi2c,

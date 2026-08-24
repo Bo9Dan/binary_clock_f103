@@ -28,6 +28,9 @@ HAL_StatusTypeDef RtcDs3231_ReadDateTime(I2C_HandleTypeDef *hi2c,
                                          RtcDs3231_DateTime *date_time);
 HAL_StatusTypeDef RtcDs3231_WriteDateTime(I2C_HandleTypeDef *hi2c,
                                           const RtcDs3231_DateTime *date_time);
+HAL_StatusTypeDef RtcDs3231_IsOscillatorStopFlagSet(I2C_HandleTypeDef *hi2c,
+                                                    bool *is_set);
+HAL_StatusTypeDef RtcDs3231_ClearOscillatorStopFlag(I2C_HandleTypeDef *hi2c);
 HAL_StatusTypeDef RtcDs3231_ReadTime(I2C_HandleTypeDef *hi2c,
                                      RtcDs3231_Time *time);
 HAL_StatusTypeDef RtcDs3231_WriteTime(I2C_HandleTypeDef *hi2c,

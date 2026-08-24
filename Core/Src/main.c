@@ -185,6 +185,8 @@ static void App_HandleGesture(Apds9960Gesture gesture, uint32_t now_ms);
 static void App_ReadRtcAndRefresh(void);
 static void App_ReadEnvironmentAndRefresh(void);
 static void App_ReadAmbientLightAndUpdate(uint8_t *current_brightness_percent);
+static bool App_WriteRtcAndVerify(const RtcDs3231_DateTime *date_time,
+                                  const char *label);
 static void ShiftRegister_Write24(uint32_t value);
 
 /* USER CODE END PFP */
@@ -679,6 +681,57 @@ static void App_ReadAmbientLightAndUpdate(uint8_t *current_brightness_percent)
   }
 }
 
+static bool App_WriteRtcAndVerify(const RtcDs3231_DateTime *date_time,
+                                  const char *label)
+{
+  RtcDs3231_DateTime read_back;
+  char line[64];
+
+  if ((date_time == NULL) || (label == NULL))
+  {
+    return false;
+  }
+
+  if (RtcDs3231_WriteDateTime(&hi2c1, date_time) != HAL_OK)
+  {
+    (void) snprintf(line, sizeof(line), "%s save FAILED: write", label);
+    Debug_WriteLine(line);
+    return false;
+  }
+
+  if (RtcDs3231_ReadDateTime(&hi2c1, &read_back) != HAL_OK)
+  {
+    (void) snprintf(line, sizeof(line), "%s save FAILED: read-back", label);
+    Debug_WriteLine(line);
+    return false;
+  }
+
+  latest_rtc_time = read_back;
+  latest_rtc_time_valid = true;
+
+  if ((read_back.year != date_time->year) ||
+      (read_back.month != date_time->month) ||
+      (read_back.day != date_time->day) ||
+      (read_back.hours != date_time->hours) ||
+      (read_back.minutes != date_time->minutes))
+  {
+    (void) snprintf(line, sizeof(line), "%s save VERIFY FAILED", label);
+    Debug_WriteLine(line);
+    Debug_WriteDateTime(&read_back);
+    return false;
+  }
+
+  if (RtcDs3231_ClearOscillatorStopFlag(&hi2c1) != HAL_OK)
+  {
+    Debug_WriteLine("RTC OSF clear FAILED");
+  }
+
+  (void) snprintf(line, sizeof(line), "%s save verified", label);
+  Debug_WriteLine(line);
+  Debug_WriteDateTime(&read_back);
+  return true;
+}
+
 static bool App_IsEditing(void)
 {
   return app_edit_field != APP_EDIT_FIELD_NONE;
@@ -888,10 +941,8 @@ static void App_AdvanceOrSaveEdit(void)
         edited_time.minutes = app_edit_minutes;
         edited_time.seconds = 0U;
 
-        if (RtcDs3231_WriteDateTime(&hi2c1, &edited_time) == HAL_OK)
+        if (App_WriteRtcAndVerify(&edited_time, "TIME"))
         {
-          latest_rtc_time = edited_time;
-          latest_rtc_time_valid = true;
           app_edit_field = APP_EDIT_FIELD_NONE;
           (void) snprintf(line, sizeof(line), "TIME saved %02u:%02u",
                           edited_time.hours, edited_time.minutes);
@@ -913,10 +964,8 @@ static void App_AdvanceOrSaveEdit(void)
         edited_date.month = app_edit_month;
         edited_date.day = app_edit_day;
 
-        if (RtcDs3231_WriteDateTime(&hi2c1, &edited_date) == HAL_OK)
+        if (App_WriteRtcAndVerify(&edited_date, "DATE"))
         {
-          latest_rtc_time = edited_date;
-          latest_rtc_time_valid = true;
           app_edit_field = APP_EDIT_FIELD_NONE;
           (void) snprintf(line, sizeof(line), "DATE saved %02u-%02u",
                           edited_date.month, edited_date.day);
@@ -1221,7 +1270,14 @@ int main(void)
   }
   else
   {
+    bool oscillator_stopped = false;
+
     Debug_WriteLine("DS3231 found");
+    if (RtcDs3231_IsOscillatorStopFlagSet(&hi2c1, &oscillator_stopped) == HAL_OK)
+    {
+      Debug_WriteLine(oscillator_stopped ? "RTC OSF set: time may be stale"
+                                         : "RTC OSF clear");
+    }
 
 #if RTC_WRITE_EXAMPLE_ON_BOOT
     const RtcDs3231_DateTime start_time = {
