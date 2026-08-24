@@ -1,0 +1,12 @@
+build/
+mx.scratch/
+!.settings/
+
+.DS_Store
+CMakeUserPresets.json
+
+*.elf
+*.bin
+*.hex
+*.map
+*.list
